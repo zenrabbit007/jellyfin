@@ -95,6 +95,17 @@ public sealed class TrickplayLayoutTests
         Assert.Null(info);
     }
 
+    [Theory]
+    [InlineData(60, 1)]
+    [InlineData(1000, 1)]
+    [InlineData(1001, 2)]
+    [InlineData(1200, 2)]
+    [InlineData(0, 0)]
+    public void GetExpectedTileCount_ReturnsTilesOfCompleteSet(int runtimeSeconds, int expected)
+    {
+        Assert.Equal(expected, TrickplayLayout.GetExpectedTileCount(TimeSpan.FromSeconds(runtimeSeconds), _options));
+    }
+
     [Fact]
     public void TryGetTileRange_ReturnsFullTile()
     {

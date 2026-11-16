@@ -219,6 +219,15 @@ public partial class TrickplayManager : ITrickplayManager
                 continue;
             }
 
+            // On demand extraction creates a folder as soon as a single tile is requested, those folders
+            // are not complete. Adopting them would store metadata that hides all the other tiles.
+            if (options.EnableOnDemandExtraction
+                && tiles.Length < TrickplayLayout.GetExpectedTileCount(TimeSpan.FromTicks(video.RunTimeTicks ?? 0), options.Interval, tileWidth, tileHeight))
+            {
+                _logger.LogDebug("Skipping incomplete trickplay tile folder {Folder} for {ItemId}", subdir.Name, video.Id);
+                continue;
+            }
+
             // The encoder pads the last tile to a full TileWidth*TileHeight grid, so the real
             // thumbnail count cannot be read from tile dimensions. Instead, bound the count from
             // the tile count and per-tile capacity, then pick an interval consistent with the
@@ -459,31 +468,45 @@ public partial class TrickplayManager : ITrickplayManager
                             return;
                         }
 
-                        // Import tiles
-                        var localTrickplayInfo = new TrickplayInfo
+                        // Tiles that were generated on demand are only a part of the set, importing them would
+                        // store metadata that makes the missing tiles unreachable.
+                        var expectedTiles = TrickplayLayout.GetExpectedTileCount(TimeSpan.FromTicks(video.RunTimeTicks ?? 0), options);
+                        if (expectedTiles > existingFiles.Length)
                         {
-                            ItemId = video.Id,
-                            Width = width,
-                            Interval = options.Interval,
-                            TileWidth = options.TileWidth,
-                            TileHeight = options.TileHeight,
-                            ThumbnailCount = existingFiles.Length,
-                            Height = 0,
-                            Bandwidth = 0
-                        };
-
-                        foreach (var tile in existingFiles)
-                        {
-                            var image = _imageEncoder.GetImageSize(tile.FullName);
-                            localTrickplayInfo.Height = Math.Max(localTrickplayInfo.Height, (int)Math.Ceiling((double)image.Height / localTrickplayInfo.TileHeight));
-                            var bitrate = (int)Math.Ceiling((decimal)tile.Length * 8 / localTrickplayInfo.TileWidth / localTrickplayInfo.TileHeight / (localTrickplayInfo.Interval / 1000));
-                            localTrickplayInfo.Bandwidth = Math.Max(localTrickplayInfo.Bandwidth, bitrate);
+                            _logger.LogDebug(
+                                "Found only {TileCount} of {ExpectedTileCount} trickplay tiles for {ItemId}, generating the remaining tiles.",
+                                existingFiles.Length,
+                                expectedTiles,
+                                video.Id);
                         }
+                        else
+                        {
+                            // Import tiles
+                            var localTrickplayInfo = new TrickplayInfo
+                            {
+                                ItemId = video.Id,
+                                Width = width,
+                                Interval = options.Interval,
+                                TileWidth = options.TileWidth,
+                                TileHeight = options.TileHeight,
+                                ThumbnailCount = existingFiles.Length,
+                                Height = 0,
+                                Bandwidth = 0
+                            };
 
-                        await SaveTrickplayInfo(localTrickplayInfo).ConfigureAwait(false);
+                            foreach (var tile in existingFiles)
+                            {
+                                var image = _imageEncoder.GetImageSize(tile.FullName);
+                                localTrickplayInfo.Height = Math.Max(localTrickplayInfo.Height, (int)Math.Ceiling((double)image.Height / localTrickplayInfo.TileHeight));
+                                var bitrate = (int)Math.Ceiling((decimal)tile.Length * 8 / localTrickplayInfo.TileWidth / localTrickplayInfo.TileHeight / (localTrickplayInfo.Interval / 1000));
+                                localTrickplayInfo.Bandwidth = Math.Max(localTrickplayInfo.Bandwidth, bitrate);
+                            }
 
-                        _logger.LogDebug("Imported existing trickplay files for {ItemId}.", video.Id);
-                        return;
+                            await SaveTrickplayInfo(localTrickplayInfo).ConfigureAwait(false);
+
+                            _logger.LogDebug("Imported existing trickplay files for {ItemId}.", video.Id);
+                            return;
+                        }
                     }
                 }
 

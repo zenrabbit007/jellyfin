@@ -81,6 +81,38 @@ internal static class TrickplayLayout
     }
 
     /// <summary>
+    /// Gets the amount of tiles a complete tile set of a video has.
+    /// </summary>
+    /// <param name="runtime">The runtime of the video.</param>
+    /// <param name="options">The trickplay options.</param>
+    /// <returns>The amount of tiles, <c>0</c> when the runtime is unknown.</returns>
+    public static int GetExpectedTileCount(TimeSpan runtime, TrickplayOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        return GetExpectedTileCount(runtime, options.Interval, options.TileWidth, options.TileHeight);
+    }
+
+    /// <summary>
+    /// Gets the amount of tiles a complete tile set of a video has.
+    /// </summary>
+    /// <param name="runtime">The runtime of the video.</param>
+    /// <param name="interval">The interval in milliseconds between each thumbnail.</param>
+    /// <param name="tileWidth">The amount of thumbnails per row.</param>
+    /// <param name="tileHeight">The amount of thumbnails per column.</param>
+    /// <returns>The amount of tiles, <c>0</c> when the runtime is unknown.</returns>
+    public static int GetExpectedTileCount(TimeSpan runtime, int interval, int tileWidth, int tileHeight)
+    {
+        if (runtime <= TimeSpan.Zero || interval <= 0 || tileWidth <= 0 || tileHeight <= 0)
+        {
+            return 0;
+        }
+
+        var thumbnailCount = (int)Math.Ceiling(runtime.TotalMilliseconds / interval);
+        return (int)Math.Ceiling((double)thumbnailCount / (tileWidth * tileHeight));
+    }
+
+    /// <summary>
     /// Gets the thumbnails and the time window a tile with the given index is made of.
     /// </summary>
     /// <param name="info">The trickplay information.</param>
