@@ -845,7 +845,9 @@ namespace MediaBrowser.MediaEncoding.Encoder
             ProcessPriorityClass? priority,
             bool enableKeyFrameOnlyExtraction,
             EncodingHelper encodingHelper,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            TimeSpan? startTime = null,
+            TimeSpan? endTime = null)
         {
             var options = allowHwAccel ? _configurationManager.GetEncodingOptions() : new EncodingOptions();
             threads ??= _threads;
@@ -931,6 +933,18 @@ namespace MediaBrowser.MediaEncoding.Encoder
 
             inputArg += " -map 0:" + streamIndex;
 
+            // Seek before the input to keep the extraction cheap, and stop decoding at the end of the requested window.
+            if (startTime.HasValue && startTime.Value > TimeSpan.Zero)
+            {
+                inputArg = string.Create(CultureInfo.InvariantCulture, $"-ss {startTime.Value.TotalSeconds:0.###} ") + inputArg;
+            }
+
+            if (endTime.HasValue && endTime.Value > (startTime ?? TimeSpan.Zero))
+            {
+                var duration = endTime.Value - (startTime ?? TimeSpan.Zero);
+                inputArg += string.Create(CultureInfo.InvariantCulture, $" -t {duration.TotalSeconds:0.###}");
+            }
+
             var filterParam = encodingHelper.GetVideoProcessingFilterParam(jobState, options, vidEncoder).Trim();
             if (string.IsNullOrWhiteSpace(filterParam))
             {
@@ -956,6 +970,14 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 }
             }
 
+            if (startTime.HasValue || endTime.HasValue)
+            {
+                // When only a window of the video is extracted, take the first frame at or after every
+                // interval boundary. The default rounding picks the closest frame, which can order the
+                // thumbnails of a keyframe only extraction incorrectly and shifts them by half an interval.
+                filterParam = UseFrameAtOrAfterBoundary(filterParam);
+            }
+
             try
             {
                 return await ExtractVideoImagesOnIntervalInternal(
@@ -978,6 +1000,29 @@ namespace MediaBrowser.MediaEncoding.Encoder
             }
 
             return await ExtractVideoImagesOnIntervalInternal(inputArg, filterParam, vidEncoder, threads, qualityScale, priority, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Makes the thumbnail extraction use the first frame at or after each interval boundary.
+        /// </summary>
+        /// <param name="filterParam">The filter parameters.</param>
+        /// <returns>The filter parameters with the adjusted frame selection.</returns>
+        private static string UseFrameAtOrAfterBoundary(string filterParam)
+        {
+            var fpsFilterIndex = filterParam.IndexOf("fps=", StringComparison.Ordinal);
+            if (fpsFilterIndex < 0)
+            {
+                return filterParam;
+            }
+
+            var endIndex = filterParam.IndexOf(',', fpsFilterIndex);
+            var end = endIndex < 0 ? filterParam.Length : endIndex;
+            if (filterParam.AsSpan(fpsFilterIndex, end - fpsFilterIndex).Contains(":round=", StringComparison.Ordinal))
+            {
+                return filterParam;
+            }
+
+            return filterParam.Insert(end, ":round=up");
         }
 
         private async Task<string> ExtractVideoImagesOnIntervalInternal(

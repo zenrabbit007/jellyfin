@@ -94,6 +94,11 @@ public class TrickplayController : BaseJellyfinApiController
 
         var saveWithMedia = _libraryManager.GetLibraryOptions(item).SaveTrickplayWithMedia;
         var path = await _trickplayManager.GetTrickplayTilePathAsync(item, width, index, saveWithMedia).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path))
+        {
+            path = await _trickplayManager.GetTrickplayTilePathOnDemandAsync(item, width, index, saveWithMedia, HttpContext.RequestAborted).ConfigureAwait(false);
+        }
+
         if (!string.IsNullOrEmpty(path) && System.IO.File.Exists(path))
         {
             Response.Headers.ContentDisposition = "attachment";

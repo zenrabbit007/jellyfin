@@ -17,9 +17,11 @@ using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.IO;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Trickplay;
 using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using Microsoft.EntityFrameworkCore;
@@ -41,8 +43,15 @@ public partial class TrickplayManager : ITrickplayManager
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
     private readonly IApplicationPaths _appPaths;
     private readonly IPathManager _pathManager;
+    private readonly ILibraryManager _libraryManager;
 
     private static readonly AsyncNonKeyedLocker _resourcePool = new(1);
+    private static readonly AsyncKeyedLocker<string> _onDemandTileLocks = new(o =>
+    {
+        o.PoolSize = 20;
+        o.PoolInitialFill = 1;
+    });
+
     private static readonly string[] _trickplayImgExtensions = [".jpg"];
 
     /// <summary>
@@ -57,6 +66,7 @@ public partial class TrickplayManager : ITrickplayManager
     /// <param name="dbProvider">The database provider.</param>
     /// <param name="appPaths">The application paths.</param>
     /// <param name="pathManager">The path manager.</param>
+    /// <param name="libraryManager">The library manager.</param>
     public TrickplayManager(
         ILogger<TrickplayManager> logger,
         IMediaEncoder mediaEncoder,
@@ -66,7 +76,8 @@ public partial class TrickplayManager : ITrickplayManager
         IImageEncoder imageEncoder,
         IDbContextFactory<JellyfinDbContext> dbProvider,
         IApplicationPaths appPaths,
-        IPathManager pathManager)
+        IPathManager pathManager,
+        ILibraryManager libraryManager)
     {
         _logger = logger;
         _mediaEncoder = mediaEncoder;
@@ -77,6 +88,7 @@ public partial class TrickplayManager : ITrickplayManager
         _dbProvider = dbProvider;
         _appPaths = appPaths;
         _pathManager = pathManager;
+        _libraryManager = libraryManager;
     }
 
     /// <inheritdoc />
@@ -741,7 +753,10 @@ public partial class TrickplayManager : ITrickplayManager
     public async Task<Dictionary<string, Dictionary<int, TrickplayInfo>>> GetTrickplayManifest(BaseItem item)
     {
         var trickplayManifest = new Dictionary<string, Dictionary<int, TrickplayInfo>>();
-        foreach (var mediaSource in item.GetMediaSources(false))
+        var mediaSources = item.GetMediaSources(false);
+        var onDemandResolutions = CreateOnDemandResolutions(item, mediaSources);
+
+        foreach (var mediaSource in mediaSources)
         {
             if (mediaSource.IsRemote || !Guid.TryParse(mediaSource.Id, out var mediaSourceId))
             {
@@ -749,6 +764,14 @@ public partial class TrickplayManager : ITrickplayManager
             }
 
             var trickplayResolutions = await GetTrickplayResolutions(mediaSourceId).ConfigureAwait(false);
+
+            if (onDemandResolutions.TryGetValue(mediaSource.Id, out var onDemandResolution))
+            {
+                foreach (var (width, info) in onDemandResolution)
+                {
+                    trickplayResolutions.TryAdd(width, info);
+                }
+            }
 
             if (trickplayResolutions.Count > 0)
             {
@@ -769,6 +792,70 @@ public partial class TrickplayManager : ITrickplayManager
         }
 
         return string.Empty;
+    }
+
+    /// <inheritdoc />
+    public async Task<string?> GetTrickplayTilePathOnDemandAsync(BaseItem item, int width, int index, bool saveWithMedia, CancellationToken cancellationToken)
+    {
+        if (item is not Video video || !CanGenerateOnDemandTrickplay(video))
+        {
+            return null;
+        }
+
+        var options = _config.Configuration.TrickplayOptions;
+        var trickplayResolutions = await GetTrickplayResolutions(video.Id).ConfigureAwait(false);
+
+        if (!trickplayResolutions.TryGetValue(width, out var trickplayInfo))
+        {
+            var videoStream = GetOwnMediaSource(video)?.VideoStream;
+            if (videoStream is null || video.RunTimeTicks is null)
+            {
+                return null;
+            }
+
+            trickplayInfo = CreateOnDemandInfo(video.Id, TimeSpan.FromTicks(video.RunTimeTicks.Value), videoStream, width, options);
+            if (trickplayInfo is null)
+            {
+                return null;
+            }
+        }
+
+        var path = Path.Combine(
+            GetTrickplayDirectory(video, trickplayInfo.TileWidth, trickplayInfo.TileHeight, trickplayInfo.Width, saveWithMedia),
+            index.ToString(CultureInfo.InvariantCulture) + ".jpg");
+
+        if (File.Exists(path))
+        {
+            return path;
+        }
+
+        if (!TrickplayLayout.TryGetTileRange(trickplayInfo, index, out var range))
+        {
+            return null;
+        }
+
+        // Several requests (or several clients) can ask for the same tile at the same time, make sure it's only extracted once.
+        using (await _onDemandTileLocks.LockAsync(path, cancellationToken).ConfigureAwait(false))
+        {
+            if (File.Exists(path))
+            {
+                return path;
+            }
+
+            try
+            {
+                return await GenerateTrickplayTileAsync(video, trickplayInfo, range, path, options, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating trickplay tile {Path} on demand", path);
+                return null;
+            }
+        }
     }
 
     /// <inheritdoc />
@@ -881,6 +968,232 @@ public partial class TrickplayManager : ITrickplayManager
                 .Where(i => i.ItemId.Equals(itemId))
                 .AnyAsync(i => i.Width == width)
                 .ConfigureAwait(false);
+        }
+    }
+
+    private bool CanGenerateOnDemandTrickplay(Video video)
+    {
+        var options = _config.Configuration.TrickplayOptions;
+        return options.EnableOnDemandExtraction
+            && CanGenerateTrickplay(video, options.Interval)
+            && _libraryManager.GetLibraryOptions(video).EnableTrickplayImageExtraction;
+    }
+
+    /// <summary>
+    /// Creates the resolutions that will be generated on demand for an item.
+    /// </summary>
+    /// <param name="item">The item.</param>
+    /// <param name="mediaSources">The media sources of the item.</param>
+    /// <returns>A map of media source id to a map of tile width to the not yet generated trickplay information.</returns>
+    private Dictionary<string, Dictionary<int, TrickplayInfo>> CreateOnDemandResolutions(BaseItem item, IReadOnlyList<MediaSourceInfo> mediaSources)
+    {
+        var resolutions = new Dictionary<string, Dictionary<int, TrickplayInfo>>();
+        var options = _config.Configuration.TrickplayOptions;
+        if (!options.EnableOnDemandExtraction
+            || item is not Video video
+            || video.RunTimeTicks is null
+            || !CanGenerateTrickplay(video, options.Interval)
+            || !_libraryManager.GetLibraryOptions(video).EnableTrickplayImageExtraction)
+        {
+            return resolutions;
+        }
+
+        var ownMediaSource = FindOwnMediaSource(mediaSources, video.Id);
+        var videoStream = ownMediaSource?.VideoStream;
+        if (ownMediaSource is null || videoStream is null)
+        {
+            return resolutions;
+        }
+
+        var runtime = TimeSpan.FromTicks(video.RunTimeTicks.Value);
+        var widths = new Dictionary<int, TrickplayInfo>();
+        foreach (var width in options.WidthResolutions)
+        {
+            var info = CreateOnDemandInfo(video.Id, runtime, videoStream, width, options);
+            if (info is not null)
+            {
+                widths.TryAdd(info.Width, info);
+            }
+        }
+
+        if (widths.Count > 0)
+        {
+            resolutions[ownMediaSource.Id] = widths;
+        }
+
+        return resolutions;
+    }
+
+    /// <summary>
+    /// Creates the trickplay information of tiles that are generated on demand.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="runtime">The runtime of the video.</param>
+    /// <param name="videoStream">The video stream the thumbnails are extracted from.</param>
+    /// <param name="requestedWidth">The width of a single thumbnail.</param>
+    /// <param name="options">The trickplay options.</param>
+    /// <returns>The trickplay information or <c>null</c> when the width is not configured.</returns>
+    private static TrickplayInfo? CreateOnDemandInfo(Guid itemId, TimeSpan runtime, MediaStream videoStream, int requestedWidth, TrickplayOptions options)
+    {
+        var info = TrickplayLayout.CreateOnDemandInfo(itemId, runtime, videoStream, requestedWidth, options);
+        if (info is null)
+        {
+            return null;
+        }
+
+        // Only expose the widths the server is configured for, so that arbitrary widths can't be used
+        // to generate (and store) tiles that no client would ever request.
+        var isConfiguredWidth = options.WidthResolutions
+            .Select(configuredWidth => TrickplayLayout.GetThumbnailSize(videoStream, configuredWidth).Width)
+            .Contains(info.Width);
+
+        return isConfiguredWidth ? info : null;
+    }
+
+    /// <summary>
+    /// Gets the media source that belongs to the item itself, the sources of the other versions are not used for trickplay.
+    /// </summary>
+    /// <param name="video">The video.</param>
+    /// <returns>The media source or <c>null</c>.</returns>
+    private static MediaSourceInfo? GetOwnMediaSource(Video video)
+    {
+        return FindOwnMediaSource(video.GetMediaSources(false), video.Id);
+    }
+
+    private static MediaSourceInfo? FindOwnMediaSource(IReadOnlyList<MediaSourceInfo> mediaSources, Guid itemId)
+    {
+        return mediaSources.FirstOrDefault(source => Guid.TryParse(source.Id, out var sourceId) && sourceId.Equals(itemId));
+    }
+
+    private async Task<string?> GenerateTrickplayTileAsync(
+        Video video,
+        TrickplayInfo trickplayInfo,
+        TrickplayTileRange range,
+        string outputPath,
+        TrickplayOptions options,
+        CancellationToken cancellationToken)
+    {
+        var mediaSource = GetOwnMediaSource(video);
+        var videoStream = mediaSource?.VideoStream;
+        if (mediaSource is null
+            || videoStream is null
+            || string.IsNullOrEmpty(mediaSource.Path)
+            || !File.Exists(mediaSource.Path))
+        {
+            _logger.LogDebug("Unable to generate trickplay tile {Path}, no playable media source found for {ItemId}", outputPath, video.Id);
+            return null;
+        }
+
+        _logger.LogDebug(
+            "Generating trickplay tile {Path} for {ItemId} on demand, thumbnails {FirstThumbnail}-{LastThumbnail}",
+            outputPath,
+            video.Id,
+            range.FirstThumbnail,
+            range.FirstThumbnail + range.ThumbnailCount - 1);
+
+        var imagesDirectory = await _mediaEncoder.ExtractVideoImagesOnIntervalAccelerated(
+            mediaSource.Path,
+            mediaSource.Container,
+            mediaSource,
+            videoStream,
+            trickplayInfo.Width,
+            TimeSpan.FromMilliseconds(trickplayInfo.Interval),
+            options.EnableHwAcceleration,
+            options.EnableHwEncoding,
+            options.ProcessThreads,
+            options.Qscale,
+            options.ProcessPriority,
+            options.EnableKeyFrameOnlyExtraction,
+            _encodingHelper,
+            cancellationToken,
+            range.Start,
+            range.End).ConfigureAwait(false);
+
+        try
+        {
+            if (string.IsNullOrEmpty(imagesDirectory) || !Directory.Exists(imagesDirectory))
+            {
+                _logger.LogWarning("No images were extracted for trickplay tile {Path}", outputPath);
+                return null;
+            }
+
+            var images = _fileSystem.GetFiles(imagesDirectory, _trickplayImgExtensions, false, false)
+                .Select(i => i.FullName)
+                .OrderBy(i => i, StringComparer.Ordinal)
+                .Take(range.ThumbnailCount)
+                .ToList();
+
+            if (images.Count == 0)
+            {
+                _logger.LogWarning("No images were extracted for trickplay tile {Path}", outputPath);
+                return null;
+            }
+
+            if (images.Count < range.ThumbnailCount)
+            {
+                _logger.LogDebug(
+                    "Only {ImageCount} of {ThumbnailCount} thumbnails were extracted for trickplay tile {Path}",
+                    images.Count,
+                    range.ThumbnailCount,
+                    outputPath);
+            }
+
+            var workDirectory = Path.Combine(_appPaths.TempDirectory, "trickplay_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(workDirectory);
+            try
+            {
+                var tilePath = Path.Combine(workDirectory, "tile.jpg");
+                var tileHeight = _imageEncoder.CreateTrickplayTile(
+                    new ImageCollageOptions
+                    {
+                        Width = trickplayInfo.TileWidth,
+                        Height = trickplayInfo.TileHeight,
+                        OutputPath = tilePath,
+                        InputPaths = images
+                    },
+                    options.JpegQuality,
+                    trickplayInfo.Width,
+                    null);
+
+                if (tileHeight != trickplayInfo.Height)
+                {
+                    _logger.LogWarning(
+                        "Generated trickplay tile {Path} with a thumbnail height of {TileHeight} instead of the announced {AnnouncedHeight}",
+                        outputPath,
+                        tileHeight,
+                        trickplayInfo.Height);
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+
+                // Move the tile into place in a single operation, clients should never read a partially written tile.
+                File.Move(tilePath, outputPath, true);
+            }
+            finally
+            {
+                TryDeleteDirectory(workDirectory);
+            }
+
+            return outputPath;
+        }
+        finally
+        {
+            TryDeleteDirectory(imagesDirectory);
+        }
+    }
+
+    private void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Unable to delete directory {Path}: {Exception}", path, ex);
         }
     }
 }

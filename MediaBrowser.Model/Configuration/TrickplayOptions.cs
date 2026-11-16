@@ -25,6 +25,13 @@ public class TrickplayOptions
     public bool EnableKeyFrameOnlyExtraction { get; set; } = false;
 
     /// <summary>
+    /// Gets or sets a value indicating whether trickplay tiles are generated on demand when a client
+    /// requests a tile that hasn't been generated yet. When enabled, trickplay previews work without
+    /// the scheduled task having pre-generated the tiles first.
+    /// </summary>
+    public bool EnableOnDemandExtraction { get; set; } = false;
+
+    /// <summary>
     /// Gets or sets the behavior used by trickplay provider on library scan/update.
     /// </summary>
     public TrickplayScanBehavior ScanBehavior { get; set; } = TrickplayScanBehavior.NonBlocking;

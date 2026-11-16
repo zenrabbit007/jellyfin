@@ -1,0 +1,237 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Jellyfin.Database.Implementations;
+using Jellyfin.Server.Implementations.Tests.Item;
+using Jellyfin.Server.Implementations.Trickplay;
+using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.Drawing;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.IO;
+using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.IO;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
+using Xunit;
+
+namespace Jellyfin.Server.Implementations.Tests.Trickplay;
+
+public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
+{
+    private readonly string _tempDirectory = Path.Combine(Path.GetTempPath(), "jmp-trickplay-" + Guid.NewGuid().ToString("N"));
+    private readonly List<(TimeSpan? Start, TimeSpan? End)> _extractions = new();
+
+    private readonly Mock<IMediaEncoder> _mediaEncoder = new();
+    private readonly Mock<IImageEncoder> _imageEncoder = new();
+    private readonly Mock<IFileSystem> _fileSystem = new();
+
+    public TrickplayManagerOnDemandTests()
+    {
+        Directory.CreateDirectory(_tempDirectory);
+
+        _mediaEncoder
+            .Setup(e => e.ExtractVideoImagesOnIntervalAccelerated(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<MediaSourceInfo>(),
+                It.IsAny<MediaStream>(),
+                It.IsAny<int>(),
+                It.IsAny<TimeSpan>(),
+                It.IsAny<bool>(),
+                It.IsAny<bool>(),
+                It.IsAny<int?>(),
+                It.IsAny<int?>(),
+                It.IsAny<ProcessPriorityClass?>(),
+                It.IsAny<bool>(),
+                It.IsAny<EncodingHelper>(),
+                It.IsAny<CancellationToken>(),
+                It.IsAny<TimeSpan?>(),
+                It.IsAny<TimeSpan?>()))
+            .Returns((
+                string inputFile,
+                string container,
+                MediaSourceInfo mediaSource,
+                MediaStream videoStream,
+                int maxWidth,
+                TimeSpan interval,
+                bool allowHwAccel,
+                bool enableHwEncoding,
+                int? threads,
+                int? qualityScale,
+                ProcessPriorityClass? priority,
+                bool enableKeyFrameOnlyExtraction,
+                EncodingHelper encodingHelper,
+                CancellationToken cancellationToken,
+                TimeSpan? startTime,
+                TimeSpan? endTime) =>
+            {
+                _extractions.Add((startTime, endTime));
+
+                var directory = Path.Combine(_tempDirectory, "extract-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(directory);
+
+                var window = (endTime ?? TimeSpan.Zero) - (startTime ?? TimeSpan.Zero);
+                var count = Math.Max(1, (int)Math.Round(window.TotalMilliseconds / interval.TotalMilliseconds));
+                for (var i = 1; i <= count; i++)
+                {
+                    WriteFile(Path.Combine(directory, i.ToString("D8", System.Globalization.CultureInfo.InvariantCulture) + ".jpg"));
+                }
+
+                return Task.FromResult(directory);
+            });
+
+        _imageEncoder
+            .Setup(e => e.CreateTrickplayTile(It.IsAny<ImageCollageOptions>(), It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>()))
+            .Returns((ImageCollageOptions options, int quality, int imgWidth, int? imgHeight) =>
+            {
+                WriteFile(options.OutputPath);
+                return 180;
+            });
+
+        _fileSystem
+            .Setup(f => f.GetFiles(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>?>(), It.IsAny<bool>(), It.IsAny<bool>()))
+            .Returns((string path, IReadOnlyList<string>? extensions, bool enableCaseSensitiveExtensions, bool recursive) =>
+                Directory.GetFiles(path).Select(file => new FileSystemMetadata { FullName = file }).ToList());
+    }
+
+    [Fact]
+    public async Task GetTrickplayTilePathOnDemandAsync_GeneratesTileForRequestedWindow()
+    {
+        var (manager, video) = CreateManager();
+
+        var path = await manager.GetTrickplayTilePathOnDemandAsync(video, 320, 0, false, CancellationToken.None);
+
+        Assert.NotNull(path);
+        Assert.True(File.Exists(path));
+        Assert.Equal(Path.Combine(_tempDirectory, "320 - 10x10", "0.jpg"), path);
+
+        var extraction = Assert.Single(_extractions);
+        Assert.Equal(TimeSpan.Zero, extraction.Start!.Value);
+        Assert.Equal(TimeSpan.FromSeconds(600), extraction.End!.Value);
+    }
+
+    [Fact]
+    public async Task GetTrickplayTilePathOnDemandAsync_GeneratesOnlyOncePerTile()
+    {
+        var (manager, video) = CreateManager();
+
+        var first = await manager.GetTrickplayTilePathOnDemandAsync(video, 320, 0, false, CancellationToken.None);
+        var second = await manager.GetTrickplayTilePathOnDemandAsync(video, 320, 0, false, CancellationToken.None);
+
+        Assert.Equal(first, second);
+        Assert.Single(_extractions);
+    }
+
+    [Fact]
+    public async Task GetTrickplayTilePathOnDemandAsync_ReturnsNullForTileOutsideTheVideo()
+    {
+        var (manager, video) = CreateManager();
+
+        var path = await manager.GetTrickplayTilePathOnDemandAsync(video, 320, 1, false, CancellationToken.None);
+
+        Assert.Null(path);
+        Assert.Empty(_extractions);
+    }
+
+    [Fact]
+    public async Task GetTrickplayTilePathOnDemandAsync_ReturnsNullForUnconfiguredWidth()
+    {
+        var (manager, video) = CreateManager();
+
+        var path = await manager.GetTrickplayTilePathOnDemandAsync(video, 640, 0, false, CancellationToken.None);
+
+        Assert.Null(path);
+        Assert.Empty(_extractions);
+    }
+
+    private (TrickplayManager Manager, Video Video) CreateManager()
+    {
+        var itemId = Guid.NewGuid();
+        var videoStream = new MediaStream { Type = MediaStreamType.Video, Width = 1920, Height = 1080 };
+
+        var mediaSource = new MediaSourceInfo
+        {
+            Id = itemId.ToString("N", System.Globalization.CultureInfo.InvariantCulture),
+            Path = Path.Combine(_tempDirectory, "video.mp4"),
+            Container = "mp4",
+            MediaStreams = new[] { videoStream }
+        };
+        WriteFile(mediaSource.Path);
+
+        var video = new Mock<Video>();
+        video.Object.Id = itemId;
+        video.Object.VideoType = VideoType.VideoFile;
+        video.Object.RunTimeTicks = TimeSpan.FromMinutes(10).Ticks;
+
+        video.Setup(v => v.GetMediaSources(It.IsAny<bool>())).Returns(new[] { mediaSource });
+        video.Setup(v => v.GetMediaStreams()).Returns(new[] { videoStream });
+
+        var configuration = new ServerConfiguration
+        {
+            TrickplayOptions = new TrickplayOptions
+            {
+                EnableOnDemandExtraction = true,
+                Interval = 10000,
+                TileWidth = 10,
+                TileHeight = 10,
+                WidthResolutions = [320]
+            }
+        };
+
+        var configManager = new Mock<IServerConfigurationManager>();
+        configManager.Setup(c => c.Configuration).Returns(configuration);
+
+        var libraryManager = new Mock<ILibraryManager>();
+        libraryManager.Setup(l => l.GetLibraryOptions(It.IsAny<BaseItem>()))
+            .Returns(new LibraryOptions { EnableTrickplayImageExtraction = true });
+
+        var pathManager = new Mock<IPathManager>();
+        pathManager.Setup(p => p.GetTrickplayDirectory(It.IsAny<BaseItem>(), It.IsAny<bool>())).Returns(_tempDirectory);
+
+        var appPaths = new Mock<IApplicationPaths>();
+        appPaths.SetupGet(a => a.TempDirectory).Returns(_tempDirectory);
+
+        var dbFactory = new Mock<IDbContextFactory<JellyfinDbContext>>();
+        dbFactory.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>())).ReturnsAsync(() => CreateDbContext());
+
+        var manager = new TrickplayManager(
+            NullLogger<TrickplayManager>.Instance,
+            _mediaEncoder.Object,
+            _fileSystem.Object,
+            null!,
+            configManager.Object,
+            _imageEncoder.Object,
+            dbFactory.Object,
+            appPaths.Object,
+            pathManager.Object,
+            libraryManager.Object);
+
+        return (manager, video.Object);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+
+        if (disposing && Directory.Exists(_tempDirectory))
+        {
+            Directory.Delete(_tempDirectory, true);
+        }
+    }
+
+    private static void WriteFile(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, new byte[] { 0xFF, 0xD8, 0xFF, 0xD9 });
+    }
+}

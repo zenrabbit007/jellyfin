@@ -84,6 +84,17 @@ public interface ITrickplayManager
     Task<string> GetTrickplayTilePathAsync(BaseItem item, int width, int index, bool saveWithMedia);
 
     /// <summary>
+    /// Gets the path to a trickplay tile image, generating the tile on demand when it doesn't exist yet.
+    /// </summary>
+    /// <param name="item">The item.</param>
+    /// <param name="width">The width of a single thumbnail.</param>
+    /// <param name="index">The tile's index.</param>
+    /// <param name="saveWithMedia">Whether or not the tile should be saved next to the media file.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The absolute path, or <c>null</c> when the tile is not available and can't be generated.</returns>
+    Task<string?> GetTrickplayTilePathOnDemandAsync(BaseItem item, int width, int index, bool saveWithMedia, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Gets the path to a trickplay tile image.
     /// </summary>
     /// <param name="item">The item.</param>
