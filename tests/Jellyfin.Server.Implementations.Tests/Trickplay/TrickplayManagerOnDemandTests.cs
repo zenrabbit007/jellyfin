@@ -199,6 +199,16 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
     }
 
     [Fact]
+    public async Task GetTrickplayFrameAsync_IsEnabledWithoutConfiguration()
+    {
+        var (manager, video) = CreateManager(enableFrameExtraction: null);
+
+        var frame = await manager.GetTrickplayFrameAsync(video, 320, TimeSpan.FromSeconds(30), CancellationToken.None);
+
+        Assert.NotNull(frame);
+    }
+
+    [Fact]
     public async Task GetTrickplayFrameAsync_ReturnsNullWhenFrameExtractionIsDisabled()
     {
         var (manager, video) = CreateManager(enableFrameExtraction: false);
@@ -220,7 +230,7 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
         Assert.Empty(_extractions);
     }
 
-    private (TrickplayManager Manager, Video Video) CreateManager(bool enableFrameExtraction = true)
+    private (TrickplayManager Manager, Video Video) CreateManager(bool? enableFrameExtraction = true)
     {
         var itemId = Guid.NewGuid();
         var videoStream = new MediaStream { Type = MediaStreamType.Video, Width = 1920, Height = 1080 };
@@ -242,17 +252,23 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
         video.Setup(v => v.GetMediaSources(It.IsAny<bool>())).Returns(new[] { mediaSource });
         video.Setup(v => v.GetMediaStreams()).Returns(new[] { videoStream });
 
+        var trickplayOptions = new TrickplayOptions
+        {
+            EnableOnDemandExtraction = true,
+            Interval = 10000,
+            TileWidth = 10,
+            TileHeight = 10,
+            WidthResolutions = [320]
+        };
+
+        if (enableFrameExtraction.HasValue)
+        {
+            trickplayOptions.EnableOnDemandFrameExtraction = enableFrameExtraction.Value;
+        }
+
         var configuration = new ServerConfiguration
         {
-            TrickplayOptions = new TrickplayOptions
-            {
-                EnableOnDemandExtraction = true,
-                EnableOnDemandFrameExtraction = enableFrameExtraction,
-                Interval = 10000,
-                TileWidth = 10,
-                TileHeight = 10,
-                WidthResolutions = [320]
-            }
+            TrickplayOptions = trickplayOptions
         };
 
         var configManager = new Mock<IServerConfigurationManager>();

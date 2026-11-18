@@ -37,7 +37,11 @@ public class TrickplayOptions
     /// only clients that request the frame endpoint can use it. Requires <see cref="EnableOnDemandExtraction"/>
     /// so that clients are still told about the available trickplay resolutions.
     /// </summary>
-    public bool EnableOnDemandFrameExtraction { get; set; } = false;
+    /// <remarks>
+    /// Enabled by default, it only affects clients that ask for a frame and it is covered by the same
+    /// library setting as on demand tiles, which makes it a free addition instead of something to opt into.
+    /// </remarks>
+    public bool EnableOnDemandFrameExtraction { get; set; } = true;
 
     /// <summary>
     /// Gets or sets the behavior used by trickplay provider on library scan/update.
