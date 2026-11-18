@@ -188,14 +188,17 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
     }
 
     [Fact]
-    public async Task GetTrickplayFrameAsync_UsesLastThumbnailWhenPositionIsPastTheEnd()
+    public async Task GetTrickplayFrameAsync_UsesThePreviousThumbnailNearTheEnd()
     {
-        var (manager, video) = CreateManager();
+        var (manager, video) = CreateManager(runtime: TimeSpan.FromSeconds(605));
 
+        // The last bucket starts at 600s, but only 5s of video are left at that point, so the
+        // extraction has to happen at the thumbnail before it.
         var frame = await manager.GetTrickplayFrameAsync(video, 320, TimeSpan.FromMinutes(20), CancellationToken.None);
 
         Assert.NotNull(frame);
         Assert.Equal(TimeSpan.FromSeconds(590), frame.Position);
+        Assert.Equal(TimeSpan.FromSeconds(590), Assert.Single(_extractions).Start!.Value);
     }
 
     [Fact]
@@ -296,7 +299,8 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
     private (TrickplayManager Manager, Video Video) CreateManager(
         bool? enableFrameExtraction = true,
         bool enableTileExtraction = true,
-        bool libraryAllowsTrickplay = true)
+        bool libraryAllowsTrickplay = true,
+        TimeSpan? runtime = null)
     {
         var itemId = Guid.NewGuid();
         var videoStream = new MediaStream { Type = MediaStreamType.Video, Width = 1920, Height = 1080 };
@@ -313,7 +317,7 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
         var video = new Mock<Video>();
         video.Object.Id = itemId;
         video.Object.VideoType = VideoType.VideoFile;
-        video.Object.RunTimeTicks = TimeSpan.FromMinutes(10).Ticks;
+        video.Object.RunTimeTicks = (runtime ?? TimeSpan.FromMinutes(10)).Ticks;
 
         video.Setup(v => v.GetMediaSources(It.IsAny<bool>())).Returns(new[] { mediaSource });
         video.Setup(v => v.GetMediaStreams()).Returns(new[] { videoStream });

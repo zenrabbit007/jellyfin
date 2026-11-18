@@ -901,6 +901,18 @@ public partial class TrickplayManager : ITrickplayManager
         // Snap the position to the thumbnail grid, so that a client that moves the mouse around
         // keeps requesting the same frame and the extraction plus the cache can be shared.
         var framePosition = TrickplayLayout.GetThumbnailPosition(trickplayInfo, position);
+
+        // ffmpeg can't produce a frame for the last thumbnail of many files: the tail runs out
+        // before the bucket does, so nothing is decoded. Use the previous thumbnail for it.
+        if (video.RunTimeTicks is { } runtimeTicks)
+        {
+            var lastUsable = TimeSpan.FromTicks(runtimeTicks) - TimeSpan.FromMilliseconds(trickplayInfo.Interval);
+            if (lastUsable > TimeSpan.Zero && framePosition > lastUsable)
+            {
+                framePosition = TrickplayLayout.GetThumbnailPosition(trickplayInfo, lastUsable);
+            }
+        }
+
         var cacheKey = string.Create(
             CultureInfo.InvariantCulture,
             $"{video.Id:N}:{trickplayInfo.Width}:{framePosition.TotalMilliseconds:0}");
