@@ -34,8 +34,8 @@ public class TrickplayOptions
     /// <summary>
     /// Gets or sets a value indicating whether single preview frames can be extracted for an exact playback
     /// position, without writing them to disk. This is much cheaper per request than generating a tile, but
-    /// only clients that request the frame endpoint can use it. Requires <see cref="EnableOnDemandExtraction"/>
-    /// so that clients are still told about the available trickplay resolutions.
+    /// only clients that request the frame endpoint can use it. Works without
+    /// <see cref="EnableOnDemandExtraction"/>, the resolutions are still advertised to clients.
     /// </summary>
     /// <remarks>
     /// Enabled by default, it only affects clients that ask for a frame and it is covered by the same

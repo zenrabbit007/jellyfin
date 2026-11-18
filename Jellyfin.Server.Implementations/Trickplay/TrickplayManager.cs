@@ -1065,9 +1065,11 @@ public partial class TrickplayManager : ITrickplayManager
     {
         var options = _config.Configuration.TrickplayOptions;
 
-        // Frame extraction is an addition on top of on demand tiles, the tiles are what tells the
-        // clients which resolutions exist, so both have to be enabled.
-        return options.EnableOnDemandFrameExtraction && CanGenerateOnDemandTrickplay(video);
+        // Frames are independent of the tiles: they don't need a tile set to exist, only the
+        // resolutions the client is told about, which CreateOnDemandResolutions provides.
+        return options.EnableOnDemandFrameExtraction
+            && CanGenerateTrickplay(video, options.Interval)
+            && _libraryManager.GetLibraryOptions(video).EnableTrickplayImageExtraction;
     }
 
     /// <summary>
@@ -1109,7 +1111,7 @@ public partial class TrickplayManager : ITrickplayManager
     {
         var resolutions = new Dictionary<string, Dictionary<int, TrickplayInfo>>();
         var options = _config.Configuration.TrickplayOptions;
-        if (!options.EnableOnDemandExtraction
+        if (!(options.EnableOnDemandExtraction || options.EnableOnDemandFrameExtraction)
             || item is not Video video
             || video.RunTimeTicks is null
             || !CanGenerateTrickplay(video, options.Interval)

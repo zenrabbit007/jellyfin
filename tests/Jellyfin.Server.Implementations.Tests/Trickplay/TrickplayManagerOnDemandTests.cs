@@ -209,6 +209,37 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
     }
 
     [Fact]
+    public async Task GetTrickplayFrameAsync_DoesNotRequireOnDemandTiles()
+    {
+        var (manager, video) = CreateManager(enableFrameExtraction: true, enableTileExtraction: false);
+
+        var frame = await manager.GetTrickplayFrameAsync(video, 320, TimeSpan.FromSeconds(30), CancellationToken.None);
+
+        Assert.NotNull(frame);
+    }
+
+    [Fact]
+    public async Task GetTrickplayManifest_AdvertisesResolutionsWithoutOnDemandTiles()
+    {
+        var (manager, video) = CreateManager(enableFrameExtraction: true, enableTileExtraction: false);
+
+        var manifest = await manager.GetTrickplayManifest(video);
+
+        Assert.True(manifest.TryGetValue(video.Id.ToString("N", System.Globalization.CultureInfo.InvariantCulture), out var resolutions));
+        Assert.True(resolutions.ContainsKey(320));
+    }
+
+    [Fact]
+    public async Task GetTrickplayManifest_IsEmptyWithoutAnyOnDemandExtraction()
+    {
+        var (manager, video) = CreateManager(enableFrameExtraction: false, enableTileExtraction: false);
+
+        var manifest = await manager.GetTrickplayManifest(video);
+
+        Assert.Empty(manifest);
+    }
+
+    [Fact]
     public async Task GetTrickplayFrameAsync_ReturnsNullWhenFrameExtractionIsDisabled()
     {
         var (manager, video) = CreateManager(enableFrameExtraction: false);
@@ -230,7 +261,7 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
         Assert.Empty(_extractions);
     }
 
-    private (TrickplayManager Manager, Video Video) CreateManager(bool? enableFrameExtraction = true)
+    private (TrickplayManager Manager, Video Video) CreateManager(bool? enableFrameExtraction = true, bool enableTileExtraction = true)
     {
         var itemId = Guid.NewGuid();
         var videoStream = new MediaStream { Type = MediaStreamType.Video, Width = 1920, Height = 1080 };
@@ -254,7 +285,7 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
 
         var trickplayOptions = new TrickplayOptions
         {
-            EnableOnDemandExtraction = true,
+            EnableOnDemandExtraction = enableTileExtraction,
             Interval = 10000,
             TileWidth = 10,
             TileHeight = 10,
