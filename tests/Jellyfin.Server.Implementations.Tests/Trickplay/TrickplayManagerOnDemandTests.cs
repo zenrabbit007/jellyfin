@@ -209,6 +209,38 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
     }
 
     [Fact]
+    public async Task GetTrickplayFrameAsync_DoesNotRequireTheLibraryTrickplaySetting()
+    {
+        var (manager, video) = CreateManager(enableFrameExtraction: true, enableTileExtraction: false, libraryAllowsTrickplay: false);
+
+        var frame = await manager.GetTrickplayFrameAsync(video, 320, TimeSpan.FromSeconds(30), CancellationToken.None);
+
+        Assert.NotNull(frame);
+    }
+
+    [Fact]
+    public async Task GetTrickplayManifest_AdvertisesFramesForALibraryWithoutTrickplay()
+    {
+        var (manager, video) = CreateManager(enableFrameExtraction: true, enableTileExtraction: false, libraryAllowsTrickplay: false);
+
+        var manifest = await manager.GetTrickplayManifest(video);
+
+        Assert.True(manifest.TryGetValue(video.Id.ToString("N", System.Globalization.CultureInfo.InvariantCulture), out var resolutions));
+        Assert.True(resolutions.ContainsKey(320));
+    }
+
+    [Fact]
+    public async Task GetTrickplayTilePathOnDemandAsync_RequiresTheLibraryTrickplaySetting()
+    {
+        var (manager, video) = CreateManager(enableFrameExtraction: true, enableTileExtraction: true, libraryAllowsTrickplay: false);
+
+        var path = await manager.GetTrickplayTilePathOnDemandAsync(video, 320, 0, false, CancellationToken.None);
+
+        Assert.Null(path);
+        Assert.Empty(_extractions);
+    }
+
+    [Fact]
     public async Task GetTrickplayFrameAsync_DoesNotRequireOnDemandTiles()
     {
         var (manager, video) = CreateManager(enableFrameExtraction: true, enableTileExtraction: false);
@@ -261,7 +293,10 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
         Assert.Empty(_extractions);
     }
 
-    private (TrickplayManager Manager, Video Video) CreateManager(bool? enableFrameExtraction = true, bool enableTileExtraction = true)
+    private (TrickplayManager Manager, Video Video) CreateManager(
+        bool? enableFrameExtraction = true,
+        bool enableTileExtraction = true,
+        bool libraryAllowsTrickplay = true)
     {
         var itemId = Guid.NewGuid();
         var videoStream = new MediaStream { Type = MediaStreamType.Video, Width = 1920, Height = 1080 };
@@ -307,7 +342,7 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
 
         var libraryManager = new Mock<ILibraryManager>();
         libraryManager.Setup(l => l.GetLibraryOptions(It.IsAny<BaseItem>()))
-            .Returns(new LibraryOptions { EnableTrickplayImageExtraction = true });
+            .Returns(new LibraryOptions { EnableTrickplayImageExtraction = libraryAllowsTrickplay });
 
         var pathManager = new Mock<IPathManager>();
         pathManager.Setup(p => p.GetTrickplayDirectory(It.IsAny<BaseItem>(), It.IsAny<bool>())).Returns(_tempDirectory);

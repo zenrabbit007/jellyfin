@@ -38,8 +38,9 @@ public class TrickplayOptions
     /// <see cref="EnableOnDemandExtraction"/>, the resolutions are still advertised to clients.
     /// </summary>
     /// <remarks>
-    /// Enabled by default, it only affects clients that ask for a frame and it is covered by the same
-    /// library setting as on demand tiles, which makes it a free addition instead of something to opt into.
+    /// Enabled by default, it only affects clients that ask for a frame. Frames are extracted for a
+    /// single request and never stored, so this does not require the per library trickplay setting,
+    /// which guards the stored tile data instead.
     /// </remarks>
     public bool EnableOnDemandFrameExtraction { get; set; } = true;
 

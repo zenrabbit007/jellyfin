@@ -1065,10 +1065,27 @@ public partial class TrickplayManager : ITrickplayManager
     {
         var options = _config.Configuration.TrickplayOptions;
 
-        // Frames are independent of the tiles: they don't need a tile set to exist, only the
-        // resolutions the client is told about, which CreateOnDemandResolutions provides.
-        return options.EnableOnDemandFrameExtraction
-            && CanGenerateTrickplay(video, options.Interval)
+        // A frame is extracted for one request and thrown away, nothing is added to the library,
+        // so the library does not have to opt in to the stored trickplay data for this to work.
+        // The switch in the trickplay options turns it off for the whole server.
+        return options.EnableOnDemandFrameExtraction && CanGenerateTrickplay(video, options.Interval);
+    }
+
+    /// <summary>
+    /// Gets whether on demand resolutions may be advertised to clients for a video.
+    /// </summary>
+    /// <param name="video">The video.</param>
+    /// <param name="options">The trickplay options.</param>
+    /// <returns><c>true</c> when a client can request something that will be generated.</returns>
+    private bool CanAdvertiseOnDemandTrickplay(Video video, TrickplayOptions options)
+    {
+        if (options.EnableOnDemandFrameExtraction)
+        {
+            return true;
+        }
+
+        // Tiles are written next to the item or into the data directory, that stays opt in per library.
+        return options.EnableOnDemandExtraction
             && _libraryManager.GetLibraryOptions(video).EnableTrickplayImageExtraction;
     }
 
@@ -1111,11 +1128,10 @@ public partial class TrickplayManager : ITrickplayManager
     {
         var resolutions = new Dictionary<string, Dictionary<int, TrickplayInfo>>();
         var options = _config.Configuration.TrickplayOptions;
-        if (!(options.EnableOnDemandExtraction || options.EnableOnDemandFrameExtraction)
-            || item is not Video video
+        if (item is not Video video
             || video.RunTimeTicks is null
             || !CanGenerateTrickplay(video, options.Interval)
-            || !_libraryManager.GetLibraryOptions(video).EnableTrickplayImageExtraction)
+            || !CanAdvertiseOnDemandTrickplay(video, options))
         {
             return resolutions;
         }
