@@ -9,3 +9,9 @@ deployment/*/dist
 deployment/*/pkg-dist
 deployment/collect-dist/
 ci/
+
+# Build output of the host, never part of the image
+**/bin
+**/obj
+**/.vs
+**/.idea

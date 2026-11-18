@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+
+# Builds the Jellyfin server of this branch on top of the official container
+# image, so the result keeps the packaged ffmpeg, fonts, jemalloc tuning and web
+# client of upstream and only the server binaries are replaced.
+#
+#   docker build -f Dockerfile.trickplay -t jellyfin-trickplay:13 .
+#
+# The base image can be pinned with --build-arg BASE_IMAGE=jellyfin/jellyfin:unstable
+# or one of the dated tags (for example jellyfin/jellyfin:2026111613-amd64).
+
+ARG BASE_IMAGE=jellyfin/jellyfin:unstable
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+
+WORKDIR /src
+COPY . .
+
+# The runtime identifier is explicit so the image can also be cross built with
+# buildx on an architecture that differs from the target.
+RUN dotnet publish Jellyfin.Server/Jellyfin.Server.csproj \
+        --configuration Release \
+        --output /server \
+        --self-contained \
+        --runtime linux-x64 \
+        -p:DebugSymbols=false \
+        -p:DebugType=none
+
+FROM ${BASE_IMAGE}
+
+# Replace the server binaries but keep jellyfin-web, ffmpeg and the entrypoint.
+# Removing them first makes sure no assembly of another build can be loaded.
+RUN find /jellyfin -maxdepth 1 -type f -delete
+
+COPY --from=build /server/ /jellyfin/
