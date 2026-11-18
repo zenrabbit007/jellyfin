@@ -847,7 +847,8 @@ namespace MediaBrowser.MediaEncoding.Encoder
             EncodingHelper encodingHelper,
             CancellationToken cancellationToken,
             TimeSpan? startTime = null,
-            TimeSpan? endTime = null)
+            TimeSpan? endTime = null,
+            int? frameLimit = null)
         {
             var options = allowHwAccel ? _configurationManager.GetEncodingOptions() : new EncodingOptions();
             threads ??= _threads;
@@ -970,7 +971,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 }
             }
 
-            if (startTime.HasValue || endTime.HasValue)
+            if (!frameLimit.HasValue && (startTime.HasValue || endTime.HasValue))
             {
                 // When only a window of the video is extracted, take the first frame at or after every
                 // interval boundary. The default rounding picks the closest frame, which can order the
@@ -987,6 +988,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                     threads,
                     qualityScale,
                     priority,
+                    frameLimit,
                     cancellationToken).ConfigureAwait(false);
             }
             catch (FfmpegException ex)
@@ -999,7 +1001,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 _logger.LogWarning(ex, "I-frame trickplay extraction failed, will attempt standard way. Input: {InputFile}", inputFile);
             }
 
-            return await ExtractVideoImagesOnIntervalInternal(inputArg, filterParam, vidEncoder, threads, qualityScale, priority, cancellationToken).ConfigureAwait(false);
+            return await ExtractVideoImagesOnIntervalInternal(inputArg, filterParam, vidEncoder, threads, qualityScale, priority, frameLimit, cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -1032,6 +1034,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
             int? outputThreads,
             int? qualityScale,
             ProcessPriorityClass? priority,
+            int? frameLimit,
             CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(inputArg))
@@ -1073,7 +1076,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
             // Final command arguments
             var args = string.Format(
                 CultureInfo.InvariantCulture,
-                "-loglevel error {0} -an -sn {1} -threads {2} -c:v {3} {4}{5}{6}-f {7} \"{8}\"",
+                "-loglevel error {0} -an -sn {1} -threads {2} -c:v {3} {4}{5}{6}{7}-f {8} \"{9}\"",
                 inputArg,
                 filterParam,
                 outputThreads.GetValueOrDefault(_threads),
@@ -1081,6 +1084,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 encoderQualityOption + encoderQuality + " ",
                 vidEncoder.Contains("videotoolbox", StringComparison.InvariantCultureIgnoreCase) ? "-allow_sw 1 " : string.Empty, // allow_sw fallback for some intel macs
                 EncodingHelper.GetVideoSyncOption("0", EncoderVersion).Trim() + " ", // passthrough timestamp
+                frameLimit.HasValue ? string.Create(CultureInfo.InvariantCulture, $"-frames:v {frameLimit.Value} ") : string.Empty,
                 "image2",
                 outputPath);
 

@@ -113,6 +113,30 @@ internal static class TrickplayLayout
     }
 
     /// <summary>
+    /// Gets the position of the thumbnail that covers a playback position.
+    /// </summary>
+    /// <param name="info">The trickplay information.</param>
+    /// <param name="position">The playback position.</param>
+    /// <returns>The position of the thumbnail, so that repeated requests for nearby positions share one image.</returns>
+    public static TimeSpan GetThumbnailPosition(TrickplayInfo info, TimeSpan position)
+    {
+        ArgumentNullException.ThrowIfNull(info);
+
+        if (info.Interval <= 0 || position <= TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        var index = (long)(position.TotalMilliseconds / info.Interval);
+        if (info.ThumbnailCount > 0 && index >= info.ThumbnailCount)
+        {
+            index = info.ThumbnailCount - 1L;
+        }
+
+        return TimeSpan.FromMilliseconds(index * (long)info.Interval);
+    }
+
+    /// <summary>
     /// Gets the thumbnails and the time window a tile with the given index is made of.
     /// </summary>
     /// <param name="info">The trickplay information.</param>

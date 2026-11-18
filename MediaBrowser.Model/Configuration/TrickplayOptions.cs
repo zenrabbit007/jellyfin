@@ -32,6 +32,14 @@ public class TrickplayOptions
     public bool EnableOnDemandExtraction { get; set; } = false;
 
     /// <summary>
+    /// Gets or sets a value indicating whether single preview frames can be extracted for an exact playback
+    /// position, without writing them to disk. This is much cheaper per request than generating a tile, but
+    /// only clients that request the frame endpoint can use it. Requires <see cref="EnableOnDemandExtraction"/>
+    /// so that clients are still told about the available trickplay resolutions.
+    /// </summary>
+    public bool EnableOnDemandFrameExtraction { get; set; } = false;
+
+    /// <summary>
     /// Gets or sets the behavior used by trickplay provider on library scan/update.
     /// </summary>
     public TrickplayScanBehavior ScanBehavior { get; set; } = TrickplayScanBehavior.NonBlocking;

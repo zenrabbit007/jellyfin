@@ -177,6 +177,7 @@ namespace MediaBrowser.Controller.MediaEncoding
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <param name="startTime">The position to start the extraction at, or <c>null</c> to start at the beginning of the file.</param>
         /// <param name="endTime">The position to end the extraction at, or <c>null</c> to extract until the end of the file.</param>
+        /// <param name="frameLimit">The maximum amount of images to extract, or <c>null</c> to extract every interval.</param>
         /// <returns>Directory where images where extracted. A given image made before another will always be named with a lower number.</returns>
         Task<string> ExtractVideoImagesOnIntervalAccelerated(
             string inputFile,
@@ -194,7 +195,8 @@ namespace MediaBrowser.Controller.MediaEncoding
             EncodingHelper encodingHelper,
             CancellationToken cancellationToken,
             TimeSpan? startTime = null,
-            TimeSpan? endTime = null);
+            TimeSpan? endTime = null,
+            int? frameLimit = null);
 
         /// <summary>
         /// Gets the media info.

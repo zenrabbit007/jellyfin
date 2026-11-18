@@ -148,6 +148,24 @@ public sealed class TrickplayLayoutTests
         Assert.False(TrickplayLayout.TryGetTileRange(CreateInfo(thumbnailCount: 10, interval: 0), 0, out _));
     }
 
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(9.9, 0)]
+    [InlineData(10, 10000)]
+    [InlineData(12.5, 10000)]
+    [InlineData(59.999, 50000)]
+    [InlineData(600, 590000)]
+    [InlineData(5000, 590000)]
+    [InlineData(-5, 0)]
+    public void GetThumbnailPosition_SnapsToThumbnailGrid(double positionSeconds, long expectedMilliseconds)
+    {
+        var info = CreateInfo(thumbnailCount: 60);
+
+        var position = TrickplayLayout.GetThumbnailPosition(info, TimeSpan.FromSeconds(positionSeconds));
+
+        Assert.Equal(TimeSpan.FromMilliseconds(expectedMilliseconds), position);
+    }
+
     private static TrickplayInfo CreateInfo(int thumbnailCount, int interval = 10000)
     {
         return new TrickplayInfo

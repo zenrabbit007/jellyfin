@@ -29,7 +29,7 @@ namespace Jellyfin.Server.Implementations.Tests.Trickplay;
 public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
 {
     private readonly string _tempDirectory = Path.Combine(Path.GetTempPath(), "jmp-trickplay-" + Guid.NewGuid().ToString("N"));
-    private readonly List<(TimeSpan? Start, TimeSpan? End)> _extractions = new();
+    private readonly List<(TimeSpan? Start, TimeSpan? End, int? FrameLimit)> _extractions = new();
 
     private readonly Mock<IMediaEncoder> _mediaEncoder = new();
     private readonly Mock<IImageEncoder> _imageEncoder = new();
@@ -56,7 +56,8 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
                 It.IsAny<EncodingHelper>(),
                 It.IsAny<CancellationToken>(),
                 It.IsAny<TimeSpan?>(),
-                It.IsAny<TimeSpan?>()))
+                It.IsAny<TimeSpan?>(),
+                It.IsAny<int?>()))
             .Returns((
                 string inputFile,
                 string container,
@@ -73,15 +74,16 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
                 EncodingHelper encodingHelper,
                 CancellationToken cancellationToken,
                 TimeSpan? startTime,
-                TimeSpan? endTime) =>
+                TimeSpan? endTime,
+                int? frameLimit) =>
             {
-                _extractions.Add((startTime, endTime));
+                _extractions.Add((startTime, endTime, frameLimit));
 
                 var directory = Path.Combine(_tempDirectory, "extract-" + Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(directory);
 
                 var window = (endTime ?? TimeSpan.Zero) - (startTime ?? TimeSpan.Zero);
-                var count = Math.Max(1, (int)Math.Round(window.TotalMilliseconds / interval.TotalMilliseconds));
+                var count = frameLimit ?? Math.Max(1, (int)Math.Round(window.TotalMilliseconds / interval.TotalMilliseconds));
                 for (var i = 1; i <= count; i++)
                 {
                     WriteFile(Path.Combine(directory, i.ToString("D8", System.Globalization.CultureInfo.InvariantCulture) + ".jpg"));
@@ -154,7 +156,71 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
         Assert.Empty(_extractions);
     }
 
-    private (TrickplayManager Manager, Video Video) CreateManager()
+    [Fact]
+    public async Task GetTrickplayFrameAsync_ExtractsFrameAtThumbnailPosition()
+    {
+        var (manager, video) = CreateManager();
+
+        var frame = await manager.GetTrickplayFrameAsync(video, 320, TimeSpan.FromSeconds(12.5), CancellationToken.None);
+
+        Assert.NotNull(frame);
+        Assert.Equal(TimeSpan.FromSeconds(10), frame.Position);
+        Assert.NotEmpty(frame.Data.ToArray());
+
+        var extraction = Assert.Single(_extractions);
+        Assert.Equal(TimeSpan.FromSeconds(10), extraction.Start!.Value);
+        Assert.Null(extraction.End);
+        Assert.Equal(1, extraction.FrameLimit);
+    }
+
+    [Fact]
+    public async Task GetTrickplayFrameAsync_ExtractsOnlyOncePerThumbnail()
+    {
+        var (manager, video) = CreateManager();
+
+        var first = await manager.GetTrickplayFrameAsync(video, 320, TimeSpan.FromSeconds(11), CancellationToken.None);
+        var second = await manager.GetTrickplayFrameAsync(video, 320, TimeSpan.FromSeconds(19), CancellationToken.None);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.Equal(first.Position, second.Position);
+        Assert.Single(_extractions);
+    }
+
+    [Fact]
+    public async Task GetTrickplayFrameAsync_UsesLastThumbnailWhenPositionIsPastTheEnd()
+    {
+        var (manager, video) = CreateManager();
+
+        var frame = await manager.GetTrickplayFrameAsync(video, 320, TimeSpan.FromMinutes(20), CancellationToken.None);
+
+        Assert.NotNull(frame);
+        Assert.Equal(TimeSpan.FromSeconds(590), frame.Position);
+    }
+
+    [Fact]
+    public async Task GetTrickplayFrameAsync_ReturnsNullWhenFrameExtractionIsDisabled()
+    {
+        var (manager, video) = CreateManager(enableFrameExtraction: false);
+
+        var frame = await manager.GetTrickplayFrameAsync(video, 320, TimeSpan.FromSeconds(30), CancellationToken.None);
+
+        Assert.Null(frame);
+        Assert.Empty(_extractions);
+    }
+
+    [Fact]
+    public async Task GetTrickplayFrameAsync_ReturnsNullForUnconfiguredWidth()
+    {
+        var (manager, video) = CreateManager();
+
+        var frame = await manager.GetTrickplayFrameAsync(video, 640, TimeSpan.FromSeconds(30), CancellationToken.None);
+
+        Assert.Null(frame);
+        Assert.Empty(_extractions);
+    }
+
+    private (TrickplayManager Manager, Video Video) CreateManager(bool enableFrameExtraction = true)
     {
         var itemId = Guid.NewGuid();
         var videoStream = new MediaStream { Type = MediaStreamType.Video, Width = 1920, Height = 1080 };
@@ -181,6 +247,7 @@ public sealed class TrickplayManagerOnDemandTests : SqliteDbTestFixture
             TrickplayOptions = new TrickplayOptions
             {
                 EnableOnDemandExtraction = true,
+                EnableOnDemandFrameExtraction = enableFrameExtraction,
                 Interval = 10000,
                 TileWidth = 10,
                 TileHeight = 10,

@@ -34,6 +34,27 @@ namespace Jellyfin.Server.Implementations.Trickplay;
 /// </summary>
 public partial class TrickplayManager : ITrickplayManager
 {
+    // Preview frames are only a few kilobytes, keeping the last ones in memory avoids running
+    // ffmpeg again when a client moves the mouse back and forth over the same positions.
+    private const int MaxCachedFrames = 512;
+
+    private static readonly Dictionary<string, TrickplayFrame> _frameCache = new(StringComparer.Ordinal);
+    private static readonly Queue<string> _frameCacheOrder = new();
+    private static readonly object _frameCacheLock = new();
+
+    private static readonly AsyncNonKeyedLocker _resourcePool = new(1);
+    private static readonly AsyncKeyedLocker<string> _onDemandTileLocks = new(o =>
+    {
+        o.PoolSize = 20;
+        o.PoolInitialFill = 1;
+    });
+
+    private static readonly AsyncKeyedLocker<string> _onDemandFrameLocks = new(o =>
+    {
+        o.PoolSize = 20;
+        o.PoolInitialFill = 1;
+    });
+
     private readonly ILogger<TrickplayManager> _logger;
     private readonly IMediaEncoder _mediaEncoder;
     private readonly IFileSystem _fileSystem;
@@ -44,13 +65,6 @@ public partial class TrickplayManager : ITrickplayManager
     private readonly IApplicationPaths _appPaths;
     private readonly IPathManager _pathManager;
     private readonly ILibraryManager _libraryManager;
-
-    private static readonly AsyncNonKeyedLocker _resourcePool = new(1);
-    private static readonly AsyncKeyedLocker<string> _onDemandTileLocks = new(o =>
-    {
-        o.PoolSize = 20;
-        o.PoolInitialFill = 1;
-    });
 
     private static readonly string[] _trickplayImgExtensions = [".jpg"];
 
@@ -826,21 +840,10 @@ public partial class TrickplayManager : ITrickplayManager
         }
 
         var options = _config.Configuration.TrickplayOptions;
-        var trickplayResolutions = await GetTrickplayResolutions(video.Id).ConfigureAwait(false);
-
-        if (!trickplayResolutions.TryGetValue(width, out var trickplayInfo))
+        var trickplayInfo = await GetOnDemandInfoAsync(video, width).ConfigureAwait(false);
+        if (trickplayInfo is null)
         {
-            var videoStream = GetOwnMediaSource(video)?.VideoStream;
-            if (videoStream is null || video.RunTimeTicks is null)
-            {
-                return null;
-            }
-
-            trickplayInfo = CreateOnDemandInfo(video.Id, TimeSpan.FromTicks(video.RunTimeTicks.Value), videoStream, width, options);
-            if (trickplayInfo is null)
-            {
-                return null;
-            }
+            return null;
         }
 
         var path = Path.Combine(
@@ -876,6 +879,62 @@ public partial class TrickplayManager : ITrickplayManager
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error generating trickplay tile {Path} on demand", path);
+                return null;
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<TrickplayFrame?> GetTrickplayFrameAsync(BaseItem item, int width, TimeSpan position, CancellationToken cancellationToken)
+    {
+        if (item is not Video video || !CanGenerateOnDemandFrames(video))
+        {
+            return null;
+        }
+
+        var trickplayInfo = await GetOnDemandInfoAsync(video, width).ConfigureAwait(false);
+        if (trickplayInfo is null)
+        {
+            return null;
+        }
+
+        // Snap the position to the thumbnail grid, so that a client that moves the mouse around
+        // keeps requesting the same frame and the extraction plus the cache can be shared.
+        var framePosition = TrickplayLayout.GetThumbnailPosition(trickplayInfo, position);
+        var cacheKey = string.Create(
+            CultureInfo.InvariantCulture,
+            $"{video.Id:N}:{trickplayInfo.Width}:{framePosition.TotalMilliseconds:0}");
+
+        if (TryGetCachedFrame(cacheKey, out var cachedFrame))
+        {
+            return cachedFrame;
+        }
+
+        // Moving the mouse over a slider can request the same frame several times at once.
+        using (await _onDemandFrameLocks.LockAsync(cacheKey, cancellationToken).ConfigureAwait(false))
+        {
+            if (TryGetCachedFrame(cacheKey, out cachedFrame))
+            {
+                return cachedFrame;
+            }
+
+            try
+            {
+                var frame = await GenerateTrickplayFrameAsync(video, trickplayInfo, framePosition, cancellationToken).ConfigureAwait(false);
+                if (frame is not null)
+                {
+                    AddFrameToCache(cacheKey, frame);
+                }
+
+                return frame;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating trickplay frame for {ItemId} at {Position}", video.Id, framePosition);
                 return null;
             }
         }
@@ -1000,6 +1059,44 @@ public partial class TrickplayManager : ITrickplayManager
         return options.EnableOnDemandExtraction
             && CanGenerateTrickplay(video, options.Interval)
             && _libraryManager.GetLibraryOptions(video).EnableTrickplayImageExtraction;
+    }
+
+    private bool CanGenerateOnDemandFrames(Video video)
+    {
+        var options = _config.Configuration.TrickplayOptions;
+
+        // Frame extraction is an addition on top of on demand tiles, the tiles are what tells the
+        // clients which resolutions exist, so both have to be enabled.
+        return options.EnableOnDemandFrameExtraction && CanGenerateOnDemandTrickplay(video);
+    }
+
+    /// <summary>
+    /// Gets the trickplay information of an item for a width, falling back to the information of the
+    /// tiles that would be generated on demand when no tiles have been extracted yet.
+    /// </summary>
+    /// <param name="video">The video.</param>
+    /// <param name="width">The width of a single thumbnail.</param>
+    /// <returns>The trickplay information, or <c>null</c> when the width is not available.</returns>
+    private async Task<TrickplayInfo?> GetOnDemandInfoAsync(Video video, int width)
+    {
+        var trickplayResolutions = await GetTrickplayResolutions(video.Id).ConfigureAwait(false);
+        if (trickplayResolutions.TryGetValue(width, out var trickplayInfo))
+        {
+            return trickplayInfo;
+        }
+
+        var videoStream = GetOwnMediaSource(video)?.VideoStream;
+        if (videoStream is null || video.RunTimeTicks is null)
+        {
+            return null;
+        }
+
+        return CreateOnDemandInfo(
+            video.Id,
+            TimeSpan.FromTicks(video.RunTimeTicks.Value),
+            videoStream,
+            width,
+            _config.Configuration.TrickplayOptions);
     }
 
     /// <summary>
@@ -1202,6 +1299,108 @@ public partial class TrickplayManager : ITrickplayManager
         finally
         {
             TryDeleteDirectory(imagesDirectory);
+        }
+    }
+
+    /// <summary>
+    /// Extracts a single thumbnail for the requested position.
+    /// </summary>
+    /// <param name="video">The video.</param>
+    /// <param name="trickplayInfo">The trickplay information.</param>
+    /// <param name="position">The position of the thumbnail to extract.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The extracted frame, or <c>null</c> when nothing could be extracted.</returns>
+    private async Task<TrickplayFrame?> GenerateTrickplayFrameAsync(
+        Video video,
+        TrickplayInfo trickplayInfo,
+        TimeSpan position,
+        CancellationToken cancellationToken)
+    {
+        var options = _config.Configuration.TrickplayOptions;
+        var mediaSource = GetOwnMediaSource(video);
+        var videoStream = mediaSource?.VideoStream;
+        if (mediaSource is null
+            || videoStream is null
+            || string.IsNullOrEmpty(mediaSource.Path)
+            || !File.Exists(mediaSource.Path))
+        {
+            _logger.LogDebug("Unable to generate trickplay frame for {ItemId}, no playable media source found", video.Id);
+            return null;
+        }
+
+        _logger.LogDebug("Generating trickplay frame for {ItemId} at {Position} on demand", video.Id, position);
+
+        var imagesDirectory = await _mediaEncoder.ExtractVideoImagesOnIntervalAccelerated(
+            mediaSource.Path,
+            mediaSource.Container,
+            mediaSource,
+            videoStream,
+            trickplayInfo.Width,
+            TimeSpan.FromMilliseconds(trickplayInfo.Interval),
+            options.EnableHwAcceleration,
+            options.EnableHwEncoding,
+            options.ProcessThreads,
+            options.Qscale,
+            options.ProcessPriority,
+            options.EnableKeyFrameOnlyExtraction,
+            _encodingHelper,
+            cancellationToken,
+            position,
+            null,
+            1).ConfigureAwait(false);
+
+        try
+        {
+            if (string.IsNullOrEmpty(imagesDirectory) || !Directory.Exists(imagesDirectory))
+            {
+                _logger.LogDebug("No image was extracted for trickplay frame of {ItemId} at {Position}", video.Id, position);
+                return null;
+            }
+
+            var imagePath = _fileSystem.GetFiles(imagesDirectory, _trickplayImgExtensions, false, false)
+                .Select(i => i.FullName)
+                .OrderBy(i => i, StringComparer.Ordinal)
+                .FirstOrDefault();
+
+            if (imagePath is null)
+            {
+                _logger.LogDebug("No image was extracted for trickplay frame of {ItemId} at {Position}", video.Id, position);
+                return null;
+            }
+
+            var data = await File.ReadAllBytesAsync(imagePath, cancellationToken).ConfigureAwait(false);
+            return new TrickplayFrame(data, position);
+        }
+        finally
+        {
+            TryDeleteDirectory(imagesDirectory);
+        }
+    }
+
+    private static bool TryGetCachedFrame(string key, out TrickplayFrame? frame)
+    {
+        lock (_frameCacheLock)
+        {
+            return _frameCache.TryGetValue(key, out frame);
+        }
+    }
+
+    private static void AddFrameToCache(string key, TrickplayFrame frame)
+    {
+        lock (_frameCacheLock)
+        {
+            if (_frameCache.ContainsKey(key))
+            {
+                return;
+            }
+
+            _frameCache[key] = frame;
+            _frameCacheOrder.Enqueue(key);
+
+            while (_frameCacheOrder.Count > MaxCachedFrames && _frameCacheOrder.TryDequeue(out var oldest))
+            {
+                _frameCache.Remove(oldest);
+            }
         }
     }
 

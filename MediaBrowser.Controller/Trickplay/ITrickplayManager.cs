@@ -95,6 +95,16 @@ public interface ITrickplayManager
     Task<string?> GetTrickplayTilePathOnDemandAsync(BaseItem item, int width, int index, bool saveWithMedia, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Gets a single preview frame for a playback position, extracting it on demand.
+    /// </summary>
+    /// <param name="item">The item.</param>
+    /// <param name="width">The width of the frame.</param>
+    /// <param name="position">The requested position in the video.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The extracted frame, or <c>null</c> when it can't be extracted.</returns>
+    Task<TrickplayFrame?> GetTrickplayFrameAsync(BaseItem item, int width, TimeSpan position, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Gets the path to a trickplay tile image.
     /// </summary>
     /// <param name="item">The item.</param>

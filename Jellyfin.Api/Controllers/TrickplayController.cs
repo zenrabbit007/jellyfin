@@ -1,5 +1,7 @@
 using System;
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using System.Linq;
 using System.Net.Mime;
 using System.Text;
 using System.Threading.Tasks;
@@ -12,6 +14,7 @@ using MediaBrowser.Model;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Net.Http.Headers;
 
 namespace Jellyfin.Api.Controllers;
 
@@ -106,5 +109,62 @@ public class TrickplayController : BaseJellyfinApiController
         }
 
         return NotFound();
+    }
+
+    /// <summary>
+    /// Gets a single preview frame for a playback position.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="width">The width of the frame.</param>
+    /// <param name="positionTicks">The position in the video to get the frame for.</param>
+    /// <param name="mediaSourceId">The media version id, if using an alternate version.</param>
+    /// <response code="200">Frame returned.</response>
+    /// <response code="304">Frame has not changed.</response>
+    /// <response code="404">Frame not available.</response>
+    /// <returns>A <see cref="ActionResult"/> containing the frame image.</returns>
+    [HttpGet("Videos/{itemId}/Trickplay/{width}/frame.jpg")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status304NotModified)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesImageFile]
+    public async Task<ActionResult> GetTrickplayFrameImage(
+        [FromRoute, Required] Guid itemId,
+        [FromRoute, Required] int width,
+        [FromQuery] long positionTicks,
+        [FromQuery] Guid? mediaSourceId)
+    {
+        if (positionTicks < 0)
+        {
+            return BadRequest();
+        }
+
+        var item = _libraryManager.GetItemById<BaseItem>(mediaSourceId ?? itemId, User.GetUserId());
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        var frame = await _trickplayManager
+            .GetTrickplayFrameAsync(item, width, TimeSpan.FromTicks(positionTicks), HttpContext.RequestAborted)
+            .ConfigureAwait(false);
+
+        if (frame is null)
+        {
+            return NotFound();
+        }
+
+        var etag = new EntityTagHeaderValue(string.Create(
+            CultureInfo.InvariantCulture,
+            $"\"{itemId:N}-{width}-{(long)frame.Position.TotalMilliseconds}\""));
+
+        Response.Headers.ETag = etag.ToString();
+        Response.Headers.CacheControl = "private, max-age=86400";
+
+        if (Request.GetTypedHeaders().IfNoneMatch.Any(i => i.Compare(etag, useStrongComparison: false)))
+        {
+            return StatusCode(StatusCodes.Status304NotModified);
+        }
+
+        return File(frame.Data.ToArray(), MediaTypeNames.Image.Jpeg);
     }
 }
